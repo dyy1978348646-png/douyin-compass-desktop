@@ -1,0 +1,106 @@
+name: Build Desktop Apps
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install macOS tkinter
+        run: |
+          brew install python-tk@3.13 || brew install python-tk
+
+      - name: Install dependencies
+        run: pip3 install -r requirements.txt
+
+      - name: Build macOS app
+        run: bash build_mac.sh
+
+      - name: Package macOS app
+        run: |
+          mkdir -p release
+          ditto -c -k --sequesterRsrc --keepParent "dist/抖音罗盘抓取器.app" "release/douyin-compass-scraper-macos.zip"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: douyin-compass-scraper-macos
+          path: release/douyin-compass-scraper-macos.zip
+
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: pip install -r requirements.txt
+
+      - name: Build Windows app
+        shell: cmd
+        run: build.bat
+
+      - name: Package Windows app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Compress-Archive -Path "dist\抖音罗盘抓取器\*" -DestinationPath "release\douyin-compass-scraper-windows.zip" -Force
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: douyin-compass-scraper-windows
+          path: release/douyin-compass-scraper-windows.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - build-macos
+      - build-windows
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: douyin-compass-scraper-macos
+          path: release
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: douyin-compass-scraper-windows
+          path: release
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/douyin-compass-scraper-macos.zip
+            release/douyin-compass-scraper-windows.zip
