@@ -66,17 +66,11 @@ jobs:
         shell: cmd
         run: build.bat
 
-      - name: Package Windows app
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path release | Out-Null
-          Compress-Archive -Path "dist\抖音罗盘抓取器\*" -DestinationPath "release\douyin-compass-scraper-windows.zip" -Force
-
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: douyin-compass-scraper-windows
-          path: release/douyin-compass-scraper-windows.zip
+          path: dist/douyin-compass-scraper-windows.zip
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

@@ -6,7 +6,8 @@ cd /d "%~dp0"
 set "BUILD_VENV=%CD%\.build-venv-win"
 set "BUILD_PYTHON=%BUILD_VENV%\Scripts\python.exe"
 set "DIST_FOLDER=%CD%\dist\抖音罗盘抓取器"
-set "ZIP_PATH=%CD%\dist\抖音罗盘抓取器_win_full.zip"
+set "RELEASE_FOLDER=%CD%\dist\抖音罗盘抓取器_Windows版"
+set "ZIP_PATH=%CD%\dist\douyin-compass-scraper-windows.zip"
 
 echo ============================================
 echo   抖音罗盘数据抓取器 - Windows 打包脚本
@@ -63,9 +64,16 @@ if errorlevel 1 (
 )
 
 echo.
-echo [5/5] 生成 Windows 发布压缩包...
+echo [5/5] 整理新手友好的 Windows 便携版并生成压缩包...
+"%BUILD_PYTHON%" "%CD%\build_release_assets.py" windows
+if errorlevel 1 (
+    echo [错误] Windows 发布目录整理失败
+    pause
+    exit /b 1
+)
+
 if exist "%ZIP_PATH%" del /f /q "%ZIP_PATH%"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -Path '%DIST_FOLDER%' -DestinationPath '%ZIP_PATH%' -Force"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -Path '%RELEASE_FOLDER%' -DestinationPath '%ZIP_PATH%' -Force"
 if errorlevel 1 (
     echo [错误] ZIP 压缩包生成失败
     pause
@@ -75,13 +83,14 @@ if errorlevel 1 (
 echo.
 echo ============================================
 echo   打包完成!
-echo   Windows 分发包: dist\抖音罗盘抓取器_win_full.zip
-echo   解压后运行: dist\抖音罗盘抓取器\抖音罗盘抓取器.exe
+echo   Windows 分发包: dist\douyin-compass-scraper-windows.zip
+echo   解压后双击: dist\抖音罗盘抓取器_Windows版\双击启动-抖音罗盘抓取器.bat
 echo   打包虚拟环境: %BUILD_VENV%
 echo.
 echo   当前产物已内置 Chromium：
 echo   1. 首次运行无需联网安装浏览器
 echo   2. Windows 下不再弹出安装用的空白 CMD 窗口
+echo   3. 新手只需要解压后双击启动脚本
 echo ============================================
 echo.
 pause

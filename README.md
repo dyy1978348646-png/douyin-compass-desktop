@@ -83,7 +83,7 @@ xattr -cr "/Applications/抖音罗盘抓取器.app"
 1. 下载 `douyin-compass-scraper-windows.zip`
 2. 解压
 3. 打开解压后的文件夹
-4. 运行 `抖音罗盘抓取器.exe`
+4. 双击 `双击启动-抖音罗盘抓取器.bat`
 
 建议不要直接在压缩包里双击运行，一定要先完整解压。
 
@@ -375,13 +375,13 @@ build.bat
 打包完成后通常输出：
 
 ```text
-dist\抖音罗盘抓取器_win_full.zip
+dist\douyin-compass-scraper-windows.zip
 ```
 
 其中：
 
-- `dist\抖音罗盘抓取器_win_full.zip` 是给 Windows 用户分发的完整压缩包
-- 用户解压后运行 `dist\抖音罗盘抓取器\抖音罗盘抓取器.exe`
+- `dist\douyin-compass-scraper-windows.zip` 是给 Windows 用户分发的完整压缩包
+- 用户解压后双击 `dist\抖音罗盘抓取器_Windows版\双击启动-抖音罗盘抓取器.bat`
 
 注意：
 

@@ -26,3 +26,4 @@ dist/
 release/
 
 *.spec
+!douyin_compass.spec
