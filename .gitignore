@@ -11,6 +11,8 @@ venv/
 .build-venv-win/
 
 browser_profile/
+browser_profile_runtime/
+browser_profile.bak-*/
 cookies.json
 config.json
 ms-playwright/

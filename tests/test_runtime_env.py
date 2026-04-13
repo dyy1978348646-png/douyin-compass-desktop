@@ -2,37 +2,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scraper import parse_user_date_text
-
 from runtime_env import (
     bundled_playwright_browser_root,
     has_browser_install,
     pick_playwright_browser_root,
 )
-
-
-class ParseUserDateTextTests(unittest.TestCase):
-    def test_parse_full_date(self):
-        self.assertEqual(
-            parse_user_date_text("2026-03-28"),
-            parse_user_date_text("2026年3月28日"),
-        )
-
-    def test_parse_short_date_uses_current_year(self):
-        result = parse_user_date_text("3月28日", today=parse_user_date_text("2026-04-06"))
-        self.assertEqual(result.isoformat(), "2026-03-28")
-
-    def test_parse_relative_date(self):
-        today = parse_user_date_text("2026-04-06")
-        self.assertEqual(
-            parse_user_date_text("昨天", today=today).isoformat(),
-            "2026-04-05",
-        )
-
-    def test_parse_invalid_date_raises(self):
-        with self.assertRaises(RuntimeError):
-            parse_user_date_text("下周二")
-
 
 class PlaywrightBrowserPathTests(unittest.TestCase):
     def test_bundled_playwright_browser_root_matches_local_browsers_layout(self):

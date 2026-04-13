@@ -14,6 +14,7 @@ from pathlib import Path
 IS_MACOS = platform.system() == "Darwin"
 IS_WINDOWS = platform.system() == "Windows"
 APP_NAME = "抖音罗盘抓取器"
+SUPPORTED_DATE_MODES = {"last_7_days", "last_1_day"}
 
 
 def _get_runtime_data_dir() -> Path:
@@ -53,18 +54,32 @@ for d in [DATA_DIR, LOG_DIR, DOWNLOAD_DIR, PLAYWRIGHT_BROWSERS_DIR]:
 DEFAULT_CONFIG = {
     "compass_url": "https://compass.jinritemai.com",
     "portal_type": "creator",       # "creator" = 达人入口, "shop" = 店铺入口
-    "date_mode": "last_7_days",     # last_7_days | last_1_day | custom_date
-    "custom_date_text": "",
+    "scene_id": "auto",             # auto | live_review | home_overview | video_review | shop_live_data
+    "date_mode": "last_7_days",     # last_7_days | last_1_day
     "schedule_enabled": True,
     "schedule_hour": 8,
     "schedule_minute": 0,
     "headless": False,
+    "browser_launch_mode": "auto",
+    "browser_channel": "chrome",
+    "browser_profile_dir": "",
+    "chrome_executable_path": "",
+    "chrome_user_data_dir": "",
+    "chrome_profile_name": "Default",
     "browser_timeout": 60000,
     "download_timeout": 120,
     "login_wait_timeout": 300,
     "sqlite_db": str(DATA_DIR / "douyin_compass.db"),
     "sqlite_table": "rpa_douyin_launch_live",
 }
+
+
+def _sanitize_config(cfg: dict) -> dict:
+    sanitized = dict(cfg)
+    if sanitized.get("date_mode") not in SUPPORTED_DATE_MODES:
+        sanitized["date_mode"] = DEFAULT_CONFIG["date_mode"]
+    sanitized.pop("custom_date_text", None)
+    return sanitized
 
 
 def load_config() -> dict:
@@ -75,14 +90,15 @@ def load_config() -> dict:
                 saved = json.load(f)
             # 合并默认值（处理新增字段）
             merged = {**DEFAULT_CONFIG, **saved}
-            return merged
+            return _sanitize_config(merged)
         except Exception:
             return DEFAULT_CONFIG.copy()
-    return DEFAULT_CONFIG.copy()
+    return _sanitize_config(DEFAULT_CONFIG.copy())
 
 
 def save_config(cfg: dict):
     """保存配置到 config.json。"""
+    cfg = _sanitize_config(cfg)
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
