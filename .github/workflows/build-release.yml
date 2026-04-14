@@ -2,6 +2,15 @@ name: Build Desktop Apps
 
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: "选择本次手动打包的平台"
+        required: true
+        default: windows
+        type: choice
+        options:
+          - windows
+          - all
   push:
     branches:
       - main
@@ -14,6 +23,7 @@ permissions:
 
 jobs:
   build-macos:
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.target == 'all'
     runs-on: macos-latest
 
     steps:
@@ -47,6 +57,7 @@ jobs:
           path: release/douyin-compass-scraper-macos.zip
 
   build-windows:
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.target == 'windows' || github.event.inputs.target == 'all'
     runs-on: windows-latest
 
     steps:
@@ -64,6 +75,9 @@ jobs:
 
       - name: Build Windows app
         shell: cmd
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"
         run: build.bat
 
       - name: Upload Windows artifact

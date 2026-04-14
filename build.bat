@@ -1,6 +1,8 @@
 @echo off
 setlocal
 chcp 65001 >nul
+set "PYTHONIOENCODING=utf-8"
+set "PYTHONUTF8=1"
 
 cd /d "%~dp0"
 set "BUILD_VENV=%CD%\.build-venv-win"
@@ -17,7 +19,7 @@ echo.
 python --version >nul 2>&1
 if errorlevel 1 (
     echo [错误] 未检测到 Python，请先安装 Python 3.10+
-    pause
+    if /I not "%CI%"=="true" pause
     exit /b 1
 )
 
@@ -27,7 +29,7 @@ if exist "%CD%\ms-playwright" rmdir /s /q "%CD%\ms-playwright"
 python -m venv "%BUILD_VENV%"
 if errorlevel 1 (
     echo [错误] 虚拟环境创建失败
-    pause
+    if /I not "%CI%"=="true" pause
     exit /b 1
 )
 
@@ -36,7 +38,7 @@ echo [2/5] 在虚拟环境中安装 Python 依赖...
 "%BUILD_PYTHON%" -m pip install -r requirements.txt
 if errorlevel 1 (
     echo [错误] 依赖安装失败
-    pause
+    if /I not "%CI%"=="true" pause
     exit /b 1
 )
 
@@ -49,7 +51,7 @@ if errorlevel 1 (
     "%BUILD_PYTHON%" -m playwright install chromium
     if errorlevel 1 (
         echo [错误] Chromium 预装失败
-        pause
+        if /I not "%CI%"=="true" pause
         exit /b 1
     )
 )
@@ -59,7 +61,7 @@ echo [4/5] 使用虚拟环境中的 PyInstaller 生成桌面应用...
 "%BUILD_PYTHON%" -m PyInstaller --clean --noconfirm douyin_compass.spec
 if errorlevel 1 (
     echo [错误] 打包失败，请查看上方错误信息
-    pause
+    if /I not "%CI%"=="true" pause
     exit /b 1
 )
 
@@ -68,7 +70,7 @@ echo [5/5] 整理新手友好的 Windows 便携版并生成压缩包...
 "%BUILD_PYTHON%" "%CD%\build_release_assets.py" windows
 if errorlevel 1 (
     echo [错误] Windows 发布目录整理失败
-    pause
+    if /I not "%CI%"=="true" pause
     exit /b 1
 )
 
@@ -76,7 +78,7 @@ if exist "%ZIP_PATH%" del /f /q "%ZIP_PATH%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -Path '%RELEASE_FOLDER%' -DestinationPath '%ZIP_PATH%' -Force"
 if errorlevel 1 (
     echo [错误] ZIP 压缩包生成失败
-    pause
+    if /I not "%CI%"=="true" pause
     exit /b 1
 )
 
@@ -93,4 +95,4 @@ echo   2. Windows 下不再弹出安装用的空白 CMD 窗口
 echo   3. 新手只需要解压后双击启动脚本
 echo ============================================
 echo.
-pause
+if /I not "%CI%"=="true" pause
