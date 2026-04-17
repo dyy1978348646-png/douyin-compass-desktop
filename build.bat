@@ -58,7 +58,7 @@ if errorlevel 1 (
 
 echo.
 echo [4/5] 使用虚拟环境中的 PyInstaller 生成桌面应用...
-"%BUILD_PYTHON%" -m PyInstaller --clean --noconfirm douyin_compass.spec
+"%BUILD_PYTHON%" -m PyInstaller --clean --noconfirm "%CD%\douyin_compass.spec"
 if errorlevel 1 (
     echo [错误] 打包失败，请查看上方错误信息
     if /I not "%CI%"=="true" pause
