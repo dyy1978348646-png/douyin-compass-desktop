@@ -27,12 +27,7 @@ from scraper import DouyinCompassScraper
 from scraper_logic import (
     DATE_MODE_LAST_1_DAY,
     DATE_MODE_LAST_7_DAYS,
-    SCENE_AUTO,
     SCENE_DISPLAY_NAMES,
-    SCENE_HOME_OVERVIEW,
-    SCENE_LIVE_REVIEW,
-    SCENE_SHOP_LIVE_DATA,
-    SCENE_VIDEO_REVIEW,
     TASK_STATUS_CANCELLED,
     TASK_STATUS_EXPORTING,
     TASK_STATUS_FAILED,
@@ -40,7 +35,6 @@ from scraper_logic import (
     TASK_STATUS_PRECHECKING,
     TASK_STATUS_SELECTING_DATE,
     TASK_STATUS_SUCCESS,
-    resolve_requested_scene,
     resolve_target_date_range,
 )
 
@@ -75,17 +69,9 @@ def compute_scroll_units(delta: int | None = None, num: int | None = None, platf
 
 
 def build_scene_options(portal_type: str) -> list[tuple[str, str]]:
-    if portal_type == "shop":
-        return [
-            (SCENE_DISPLAY_NAMES[SCENE_AUTO], SCENE_AUTO),
-            ("实时直播数据", SCENE_SHOP_LIVE_DATA),
-        ]
-
+    """统一抓取模式：一次抓取渠道、直播、短视频全部三类数据，输出到同一张 Excel 表"""
     return [
-        (SCENE_DISPLAY_NAMES[SCENE_AUTO], SCENE_AUTO),
-        ("渠道数据", SCENE_HOME_OVERVIEW),
-        (SCENE_DISPLAY_NAMES[SCENE_LIVE_REVIEW], SCENE_LIVE_REVIEW),
-        (SCENE_DISPLAY_NAMES[SCENE_VIDEO_REVIEW], SCENE_VIDEO_REVIEW),
+        ("全部数据（渠道 + 直播 + 短视频）", "unified"),
     ]
 
 
@@ -97,12 +83,8 @@ def build_date_mode_options() -> list[tuple[str, str]]:
 
 
 def describe_scene_selection(config: dict) -> str:
-    requested_scene = config.get("scene_id", SCENE_AUTO)
-    resolved_scene = resolve_requested_scene(config)
-    if requested_scene == SCENE_AUTO:
-        return f"{SCENE_DISPLAY_NAMES[SCENE_AUTO]}（当前会走{SCENE_DISPLAY_NAMES.get(resolved_scene, resolved_scene)}）"
-
-    return SCENE_DISPLAY_NAMES.get(requested_scene, requested_scene)
+    """统一抓取：渠道 + 直播 + 短视频全部数据"""
+    return "全部数据（渠道 + 直播 + 短视频）"
 
 
 def resolve_runtime_config(
@@ -910,7 +892,7 @@ class MainWindow:
 
         self.label_precheck_note = tk.Label(
             overview_body,
-            text="还没有执行页面检查。建议先点击顶部的“检查页面”。",
+            text='还没有执行页面检查。建议先点击顶部的"检查页面"。',
             bg=self.COLORS["surface"],
             fg=self.COLORS["muted"],
             font=(UI_FONT, 10),
@@ -931,7 +913,7 @@ class MainWindow:
         left.grid(row=0, column=0, sticky="nw")
         tk.Label(
             left,
-            text="如果要更换账号，先点击“切换账号”。\n如果登录状态失效，再清除浏览器数据重新登录。",
+            text='如果要更换账号，先点击"切换账号"。\n如果登录状态失效，再清除浏览器数据重新登录。',
             bg=self.COLORS["surface"],
             fg=self.COLORS["muted"],
             justify="left",
@@ -997,14 +979,14 @@ class MainWindow:
         ).grid(row=row + 1, column=1, sticky="w")
 
         row += 2
-        tk.Label(settings_body, text="抓取场景", bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=(UI_FONT, 11)).grid(row=row, column=0, sticky="ne", pady=8)
-        self.var_scene = tk.StringVar(value=self.config.get("scene_id", SCENE_AUTO))
+        tk.Label(settings_body, text="抓取模式", bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=(UI_FONT, 11)).grid(row=row, column=0, sticky="ne", pady=8)
+        self.var_scene = tk.StringVar(value="unified")
         self.scene_selector_host = tk.Frame(settings_body, bg=self.COLORS["surface"])
         self.scene_selector_host.grid(row=row, column=1, sticky="w", pady=8)
         self._render_scene_selector()
         tk.Label(
             settings_body,
-            text="默认推荐使用“按入口默认”。如果你明确知道当前要抓的模块，也可以手动指定。",
+            text="一次抓取渠道明细、直播整体、短视频引流三类数据，输出到同一张 Excel 表的三个 Sheet",
             bg=self.COLORS["surface"],
             fg=self.COLORS["muted"],
             font=(UI_FONT, 10),
@@ -1151,6 +1133,30 @@ class MainWindow:
         self.spin_minute.insert(0, f"{self.config.get('schedule_minute', 0):02d}")
         self.spin_minute.pack(side="left", padx=(16, 6))
         tk.Label(time_row, text="分", bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=(UI_FONT, 11)).pack(side="left")
+
+        output_dir_row = tk.Frame(schedule_body, bg=self.COLORS["surface"])
+        output_dir_row.pack(anchor="w", pady=(16, 0))
+        tk.Label(output_dir_row, text="自动导出目录", bg=self.COLORS["surface"], fg=self.COLORS["muted"], font=(UI_FONT, 11)).pack(side="left")
+        self.entry_output_dir = tk.Entry(
+            output_dir_row,
+            textvariable=tk.StringVar(value=self.config.get("output_dir", "")),
+            width=32,
+            font=(UI_FONT, 11),
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=self.COLORS["border"],
+            highlightcolor=self.COLORS["accent"],
+            bd=0,
+        )
+        self.entry_output_dir.pack(side="left", padx=(16, 6))
+        self._make_button(output_dir_row, "选择...", self._browse_output_dir).pack(side="left")
+        tk.Label(
+            output_dir_row,
+            text="（留空则不自动导出）",
+            bg=self.COLORS["surface"],
+            fg=self.COLORS["muted"],
+            font=(UI_FONT, 10),
+        ).pack(side="left", padx=(8, 0))
 
         save_row = tk.Frame(schedule_body, bg=self.COLORS["surface"])
         save_row.pack(fill="x", pady=(18, 0))
@@ -1306,10 +1312,6 @@ class MainWindow:
             child.destroy()
 
         options = build_scene_options(self.var_portal.get())
-        valid_values = {value for _, value in options}
-        if self.var_scene.get() not in valid_values:
-            self.var_scene.set(SCENE_AUTO)
-
         self.scene_selector = self._make_segmented_group(
             self.scene_selector_host,
             self.var_scene,
@@ -1322,7 +1324,6 @@ class MainWindow:
         compass_url = self.entry_url.get().strip()
         headless = self.var_headless.get()
         portal_type = self.var_portal.get()
-        scene_id = self.var_scene.get()
         date_mode = self.var_date_mode.get()
 
         return {
@@ -1330,7 +1331,6 @@ class MainWindow:
             "compass_url": compass_url,
             "headless": headless,
             "portal_type": portal_type,
-            "scene_id": scene_id,
             "date_mode": date_mode,
         }
 
@@ -1341,11 +1341,10 @@ class MainWindow:
         config = self._collect_form_config(show_errors=False) or {
             **self.config,
             "portal_type": getattr(self, "var_portal", tk.StringVar(value=self.config.get("portal_type", "creator"))).get(),
-            "scene_id": getattr(self, "var_scene", tk.StringVar(value=self.config.get("scene_id", SCENE_AUTO))).get(),
             "date_mode": getattr(self, "var_date_mode", tk.StringVar(value=self.config.get("date_mode", DATE_MODE_LAST_7_DAYS))).get(),
         }
 
-        scene_text = describe_scene_selection(config)
+        scene_text = "全部数据（渠道 + 直播 + 短视频）"
         self.label_target_scene.config(text=scene_text)
 
         portal_text = "达人入口" if config.get("portal_type") == "creator" else "店铺入口"
@@ -1407,7 +1406,7 @@ class MainWindow:
         if not result:
             self.label_detected_scene.config(text="未检查")
             self.label_detected_account.config(text="未识别")
-            self.label_precheck_note.config(text="还没有执行页面检查。建议先点击顶部的“检查页面”。")
+            self.label_precheck_note.config(text='还没有执行页面检查。建议先点击顶部的"检查页面"。')
             self._apply_task_status(TASK_STATUS_PENDING)
             return
 
@@ -1441,7 +1440,6 @@ class MainWindow:
         self._refresh_task_overview()
 
         portal_name = "达人入口" if new_config["portal_type"] == "creator" else "店铺入口"
-        scene_text = describe_scene_selection(new_config)
         mode_map = {
             DATE_MODE_LAST_7_DAYS: "近期七天",
             DATE_MODE_LAST_1_DAY: "近一天",
@@ -1450,7 +1448,7 @@ class MainWindow:
             "提示",
             "配置已保存\n"
             f"入口类型: {portal_name}\n"
-            f"抓取场景: {scene_text}\n"
+            f"抓取模式: 全部数据（渠道 + 直播 + 短视频）\n"
             f"抓取日期: {mode_map[new_config['date_mode']]}",
         )
 
@@ -1486,7 +1484,7 @@ class MainWindow:
         self.btn_run_once.config(state="disabled")
         self.btn_check_page.config(state="disabled")
         self.btn_cancel.config(state="normal")
-        self._apply_task_status(TASK_STATUS_PRECHECKING, "浏览器已打开，请在浏览器中完成账号切换后点击“确认已切换”。")
+        self._apply_task_status(TASK_STATUS_PRECHECKING, '浏览器已打开，请在浏览器中完成账号切换后点击"确认已切换"。')
         self._show_page("log")
 
         self.btn_confirm_switch.pack(side="right", padx=(12, 0))
@@ -1512,9 +1510,15 @@ class MainWindow:
         self._update_cookie_status()
         if result["success"]:
             self._apply_task_status(TASK_STATUS_SUCCESS, "账号切换成功。你现在可以检查页面或直接执行抓取。")
-            messagebox.showinfo("提示", "账号切换成功！现在可以点击“立即执行一次”抓取新账号的数据。")
+            messagebox.showinfo("提示", '账号切换成功！现在可以点击"立即执行一次"抓取新账号的数据。')
         else:
             self._apply_task_status(TASK_STATUS_FAILED, result.get("message", "账号切换失败"))
+
+    def _browse_output_dir(self):
+        path = filedialog.askdirectory(title="选择自动导出目录")
+        if path:
+            self.entry_output_dir.delete(0, tk.END)
+            self.entry_output_dir.insert(0, path)
 
     def _save_schedule(self):
         new_config = {
@@ -1522,6 +1526,7 @@ class MainWindow:
             "schedule_enabled": self.var_schedule_on.get(),
             "schedule_hour": int(self.spin_hour.get()),
             "schedule_minute": int(self.spin_minute.get()),
+            "output_dir": self.entry_output_dir.get().strip(),
         }
         save_config(new_config)
         self.config = new_config
@@ -1623,10 +1628,19 @@ class MainWindow:
             if account:
                 detail += f"\n当前账号：{account}"
             self._apply_task_status(TASK_STATUS_SUCCESS, detail)
+
+            # 自动复制到指定目录（定时/自动导出场景）
+            output_dir = self.config.get("output_dir", "")
+            if output_dir and self.latest_export_path:
+                auto_copied = self._auto_copy_to_output_dir(self.latest_export_path, output_dir)
+                if auto_copied:
+                    detail += f"\n已自动导出至：{auto_copied}"
+                    self._apply_task_status(TASK_STATUS_SUCCESS, detail)
+
             if self.latest_export_path:
                 messagebox.showinfo(
                     "抓取完成",
-                    f"{result['message']}\n\n现在可以点击“导出最近一次数据”直接导出文件。"
+                    f'{result["message"]}\n\n现在可以点击"导出最近一次数据"直接导出文件。'
                 )
         else:
             self._apply_task_status(result.get("task_status", TASK_STATUS_FAILED), result.get("message"))
@@ -1729,13 +1743,16 @@ class MainWindow:
         self.log_text.configure(state="disabled")
 
     def _find_latest_export_path(self) -> Path | None:
-        patterns = ["live_*.csv", "*.xlsx"]
+        patterns = ["罗盘数据抓取_*.xlsx", "live_*.csv", "*.xlsx"]
         candidates = []
 
-        for pattern in patterns[:1]:
-            candidates.extend(DATA_DIR.glob(pattern))
-        for pattern in patterns[1:]:
-            candidates.extend(DOWNLOAD_DIR.glob(pattern))
+        candidates.extend(DOWNLOAD_DIR.glob(patterns[0]))
+        if not candidates:
+            candidates.extend(DATA_DIR.glob(patterns[1]))
+        if not candidates:
+            for pattern in patterns:
+                candidates.extend(DOWNLOAD_DIR.glob(pattern))
+                candidates.extend(DATA_DIR.glob(pattern))
 
         files = [path for path in candidates if path.is_file()]
         if not files:
@@ -1743,7 +1760,7 @@ class MainWindow:
         return max(files, key=lambda path: path.stat().st_mtime)
 
     def _resolve_export_source(self, result: dict) -> Path | None:
-        for key in ("csv_path", "filepath"):
+        for key in ("xlsx_path", "excel_path", "filepath", "csv_path"):
             value = result.get(key)
             if not value:
                 continue
@@ -1756,6 +1773,18 @@ class MainWindow:
         state = "normal" if self.latest_export_path and self.latest_export_path.exists() else "disabled"
         self.btn_export.config(state=state)
         self._refresh_latest_result_summary()
+
+    def _auto_copy_to_output_dir(self, source: Path, output_dir: str) -> str | None:
+        """自动将抓取结果复制到指定目录。"""
+        try:
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
+            target = Path(output_dir) / source.name
+            shutil.copy2(source, target)
+            logger.info(f"数据已自动导出到: {target}")
+            return str(target)
+        except Exception as e:
+            logger.exception(f"自动导出失败: {e}")
+            return None
 
     def _export_latest_data(self):
         source = self.latest_export_path

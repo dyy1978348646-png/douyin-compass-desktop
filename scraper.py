@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -184,31 +185,6 @@ def first_existing_path(candidates: list[Path]) -> Path | None:
 # ============================================================
 # Cookie 管理
 # ============================================================
-def save_cookies(context, path: Path = COOKIE_FILE):
-    """将浏览器上下文的 Cookie 保存到文件。"""
-    cookies = context.cookies()
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(cookies, f, ensure_ascii=False, indent=2)
-    logger.info(f"Cookie 已保存 ({len(cookies)} 条)")
-
-
-def load_cookies(context, path: Path = COOKIE_FILE) -> bool:
-    """从文件加载 Cookie 到浏览器上下文。返回是否成功。"""
-    if not path.exists():
-        logger.info("未找到已保存的 Cookie")
-        return False
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            cookies = json.load(f)
-        if not cookies:
-            return False
-        context.add_cookies(cookies)
-        logger.info(f"已加载 Cookie ({len(cookies)} 条)")
-        return True
-    except Exception as e:
-        logger.warning(f"Cookie 加载失败: {e}")
-        return False
-
 
 # ============================================================
 # 核心抓取类
@@ -403,55 +379,6 @@ class DouyinCompassScraper:
 
         logger.info("已清理旧标签页")
 
-    def _try_trigger_account_switch(self):
-        """尝试在页面上找到并点击账号切换入口。"""
-        # 常见的账号切换入口：右上角头像区域、账号名称等
-        switch_selectors = [
-            # 直接切换账号链接
-            'a:has-text("切换账号")',
-            'span:has-text("切换账号")',
-            'div:has-text("切换账号")',
-            # 右上角头像/用户菜单（点击后可能出现切换选项）
-            '[class*="avatar"]',
-            '[class*="user-info"]',
-            '[class*="account"]',
-            '[class*="profile"]',
-        ]
-        # 先尝试直接点击"切换账号"
-        for sel in switch_selectors[:3]:
-            try:
-                el = self.page.query_selector(sel)
-                if el and el.is_visible():
-                    el.click()
-                    wait_for_page_ready(self.page, timeout_ms=5000)
-                    logger.info("已点击'切换账号'入口")
-                    return
-            except Exception:
-                continue
-
-        # 尝试点击头像区域（可能触发下拉菜单）
-        for sel in switch_selectors[3:]:
-            try:
-                el = self.page.query_selector(sel)
-                if el and el.is_visible():
-                    el.click()
-                    wait_for_page_ready(self.page, timeout_ms=5000)
-                    # 点击头像后查找切换账号选项
-                    for text_sel in ['text="切换账号"', 'text="切换主体"', 'text="切换店铺"']:
-                        try:
-                            switch_el = self.page.query_selector(text_sel)
-                            if switch_el and switch_el.is_visible():
-                                switch_el.click()
-                                wait_for_page_ready(self.page, timeout_ms=5000)
-                                logger.info("已通过头像菜单触发账号切换")
-                                return
-                        except Exception:
-                            continue
-            except Exception:
-                continue
-
-        logger.info("未能自动触发账号切换，请在浏览器中手动操作")
-
     def run(self) -> dict:
         """执行完整抓取流程，返回结果摘要。"""
         self._cancelled = False
@@ -497,25 +424,155 @@ class DouyinCompassScraper:
                 self._open_and_wait_for_dashboard()
                 self._check_cancel()
                 self.account_name = self._get_account_name()
-                self._navigate_to_target_scene()
-                self._check_cancel()
-                self._assert_scene_ready(self.scene_id)
-                self._assert_video_review_detail_page_context()
-                self.task_status = TASK_STATUS_SELECTING_DATE
-                self._apply_date_selection()
-                self._check_cancel()
-                self.actual_date_range = self._assert_date_selection_applied(self.target_date_range)
-                self.task_status = TASK_STATUS_EXPORTING
-                if self.scene_id == SCENE_HOME_OVERVIEW:
-                    df, csv_path = self._export_home_overview_metrics()
-                    filepath = None
-                elif self.scene_id == SCENE_VIDEO_REVIEW:
-                    df, csv_path = self._export_video_review_metrics()
-                    filepath = None
-                else:
-                    filepath = self._export_data()
+
+                # ============================================================
+                # CREATOR 达人入口：统一抓取流程（首页 + 直播复盘 + 短视频）
+                # 重要：不走 500-507 行的通用导航，因为 CREATOR 的每个子模块
+                # 都有自己独立的导航+日期选择，走统一流程更稳定
+                # ============================================================
+                if self.portal_type == self.PORTAL_CREATOR:
+                    import openpyxl
+                    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+                    from scraper_storage import _safe_filename_part
+
+                    self.task_status = TASK_STATUS_EXPORTING
+                    self.actual_date_range = self.target_date_range
+                    target_date = self.target_date_range
+                    date_str = target_date.start.strftime("%Y-%m-%d") if target_date else datetime.now().strftime("%Y-%m-%d")
+                    account_safe = _safe_filename_part(self.account_name or "未知账号", "未知账号")
+                    xlsx_name = f"罗盘数据抓取_{date_str}_{account_safe}.xlsx"
+                    xlsx_path = DOWNLOAD_DIR / xlsx_name
+
+                    sheets_data = []
+
+                    # 1. 直播整体（首页 → 整体概括）
+                    try:
+                        logger.info("--- 开始抓取 [直播整体]（首页整体概括）---")
+                        self.scene_id = SCENE_HOME_OVERVIEW
+                        self._navigate_home_overview()
+                        wait_for_page_ready(self.page, timeout_ms=8000)
+                        self._apply_date_selection()
+                        self._check_cancel()
+                        self._assert_date_selection_applied(self.target_date_range)
+                        summary_metrics = self._extract_home_overview_summary_metrics()
+                        df_overall = self._build_live_overall_summary(summary_metrics)
+                        logger.info("[直播整体] 抓取完成: %s 行", len(df_overall))
+                        sheets_data.append({"name": "直播整体", "df": df_overall})
+                    except Exception as exc:
+                        logger.warning("[直播整体] 抓取失败: %s", exc)
+                        sheets_data.append({"name": "直播整体", "df": None})
+
                     self._check_cancel()
-                    df, csv_path = self._process_and_save(filepath)
+
+                    # 2. 渠道明细（直播复盘页面）
+                    try:
+                        logger.info("--- 开始抓取 [渠道明细]（直播复盘页面）---")
+                        self.scene_id = SCENE_LIVE_REVIEW
+                        self._navigate_creator_live_review()
+                        wait_for_page_ready(self.page, timeout_ms=8000)
+                        self._apply_date_selection()
+                        self._check_cancel()
+                        self._assert_date_selection_applied(self.target_date_range)
+                        df_channel, _ = self._build_live_review_export_data()
+                        logger.info("[渠道明细] 抓取完成: %s 行", len(df_channel))
+                        sheets_data.append({"name": "渠道明细", "df": df_channel})
+
+                        # 2.1 抓取渠道分析漏斗表格（曝光/观看/点击率）
+                        self._check_cancel()
+                        try:
+                            df_channel_analysis = self._extract_live_review_channel_analysis_as_df()
+                            if not df_channel_analysis.empty:
+                                crawl_time = datetime.now().isoformat()
+                                if "账号名称" not in df_channel_analysis.columns:
+                                    df_channel_analysis.insert(0, "账号名称", self.account_name or "")
+                                if "抓取时间" not in df_channel_analysis.columns:
+                                    df_channel_analysis.insert(1, "抓取时间", crawl_time)
+                                if "目标日期" not in df_channel_analysis.columns:
+                                    df_channel_analysis.insert(2, "目标日期", (
+                                        self.target_date_range.start.isoformat()
+                                        if self.target_date_range else ""
+                                    ))
+                                logger.info("[渠道分析] 抓取完成: %s 行", len(df_channel_analysis))
+                                sheets_data.append({"name": "渠道分析", "df": df_channel_analysis})
+                            else:
+                                logger.warning("[渠道分析] 未获取到数据")
+                        except Exception as exc:
+                            logger.warning("[渠道分析] 抓取失败: %s", exc)
+
+                    except Exception as exc:
+                        logger.warning("[渠道明细] 抓取失败: %s", exc)
+                        sheets_data.append({"name": "渠道明细", "df": None})
+
+                    self._check_cancel()
+
+                    # 3. 短视频引流（视频复盘页面）
+                    try:
+                        logger.info("--- 开始抓取 [短视频引流] ---")
+                        self.scene_id = SCENE_VIDEO_REVIEW
+                        self._navigate_video_review()
+                        wait_for_page_ready(self.page, timeout_ms=8000)
+                        self._scroll_to_top()
+                        self.page.wait_for_timeout(2000)
+                        self._check_cancel()
+                        self._apply_video_review_date_input()
+                        wait_for_page_ready(self.page, timeout_ms=5000)
+                        df_video, _ = self._export_video_review_metrics()
+                        logger.info("[短视频引流] 抓取完成: %s 行", len(df_video))
+                        sheets_data.append({"name": "短视频引流", "df": df_video})
+                    except Exception as exc:
+                        logger.warning("[短视频引流] 抓取失败: %s", exc)
+                        sheets_data.append({"name": "短视频引流", "df": None})
+
+                    self.scene_id = SCENE_SHOP_LIVE_DATA  # 恢复原值
+                    self._write_excel_unified(xlsx_path, sheets_data)
+                    logger.info("Excel 已保存: %s", xlsx_path)
+
+                    # 合并 DataFrame（防御：不同 sheet 列名可能重复/不同）
+                    valid_dfs = [s["df"] for s in sheets_data if s["df"] is not None and not s["df"].empty]
+
+                    if valid_dfs:
+                        # 如果只有一个，直接用；多个则 concat
+                        if len(valid_dfs) == 1:
+                            df = valid_dfs[0].copy()
+                        else:
+                            # 清理重复列名：同名列只保留第一个
+                            cleaned = []
+                            for d in valid_dfs:
+                                if d.columns.nunique() != len(d.columns):
+                                    d = d.loc[:, ~d.columns.duplicated()]
+                                cleaned.append(d)
+                            if not cleaned:
+                                df = pd.DataFrame()
+                            else:
+                                df = pd.concat(cleaned, ignore_index=True, join="outer")
+                    else:
+                        df = pd.DataFrame()
+                    filepath = xlsx_path
+                    csv_path = ""
+                    result["xlsx_path"] = str(xlsx_path)
+                    total_rows = sum(len(s["df"]) for s in sheets_data if s["df"] is not None and not s["df"].empty)
+                    result["message"] = f"成功抓取 {total_rows} 行数据（直播整体 + 渠道明细 + 短视频引流）"
+                else:
+                    # 非 CREATOR 入口：走通用流程（原有逻辑）
+                    self._navigate_to_target_scene()
+                    self._check_cancel()
+                    self._assert_scene_ready(self.scene_id)
+                    self._assert_video_review_detail_page_context()
+                    self.task_status = TASK_STATUS_SELECTING_DATE
+                    self._apply_date_selection()
+                    self._check_cancel()
+                    self.actual_date_range = self._assert_date_selection_applied(self.target_date_range)
+                    self.task_status = TASK_STATUS_EXPORTING
+                    if self.scene_id == SCENE_HOME_OVERVIEW:
+                        df, csv_path = self._export_home_overview_metrics()
+                        filepath = None
+                    elif self.scene_id == SCENE_VIDEO_REVIEW:
+                        df, csv_path = self._export_video_review_metrics()
+                        filepath = None
+                    else:
+                        filepath = self._export_data()
+                        self._check_cancel()
+                        df, csv_path = self._process_and_save(filepath)
 
                 self.task_status = TASK_STATUS_SUCCESS
                 result["success"] = True
@@ -962,18 +1019,6 @@ class DouyinCompassScraper:
         )
         return detection
 
-    def _is_account_selection_page(self, page) -> bool:
-        """
-        检测页面是否是账号选择页。
-        切换账号后会进入账号列表页面，用户需要选择具体账号。
-        这个页面不应被判定为仪表盘。
-        """
-        try:
-            visible_texts = self._visible_keywords_for_page(page, ACCOUNT_SELECTION_KEYWORDS)
-            return is_account_selection_page_snapshot(page.url, visible_texts)
-        except Exception:
-            return False
-
     def _get_account_name(self) -> str:
         """
         从仪表盘页面提取当前登录的账号名称。
@@ -1150,14 +1195,45 @@ class DouyinCompassScraper:
 
     def _navigate_creator_live_review(self):
         """
-        达人入口导航：顶部导航栏点击"直播" → 子菜单点击"直播复盘"
-        罗盘顶部导航栏有: 首页、直播、短视频、图文、橱窗、交易、商品、商家、人群、市场
-        """
-        logger.info("【达人端】导航到 直播 → 直播复盘...")
+        达人入口导航：绝对不打开新窗口。
 
-        # 第一步：点击顶部导航的"直播"标签
+        核心原理：
+        "直播"链接是纯 JS onclick → window.open() 打开新窗口。
+        在点击之前，拦截并替换 window.open，让它变成 window.location.href 跳转，
+        这样就永远不会有新窗口出现。
+        """
+        logger.info("【达人端】导航到 直播 → 直播复盘（无新窗口）...")
+
+        self.page.bring_to_front()
+        self._scroll_to_top()
+        self.page.wait_for_timeout(1500)
+
+        # ----------------------------------------------------------------
+        # 步骤 1：注入 JS，拦截 window.open，改为普通跳转
+        # ----------------------------------------------------------------
+        logger.info("步骤1：拦截 window.open，防止新窗口...")
+
+        self.page.evaluate("""
+            () => {
+                const _origOpen = window.open;
+                window.open = function(url) {
+                    // 如果是直播相关的窗口，只做普通跳转，不开新窗口
+                    if (url && url.includes('live')) {
+                        window.location.href = url;
+                        return null;  // 返回 null 表示没有真的打开窗口
+                    }
+                    return _origOpen.apply(this, arguments);
+                };
+            }
+        """)
+        logger.info("  window.open 已拦截")
+
+        # ----------------------------------------------------------------
+        # 步骤 2：点击"直播"链接
+        # ----------------------------------------------------------------
+        logger.info("步骤2：点击'直播'链接...")
+
         live_selectors = [
-            # 顶部导航栏的标签链接（优先精确匹配）
             'nav a:has-text("直播")',
             'header a:has-text("直播")',
             '[class*="tab"]:has-text("直播")',
@@ -1165,62 +1241,100 @@ class DouyinCompassScraper:
             '[class*="header"] a:has-text("直播")',
             '[class*="menu"] a:has-text("直播")',
             'a:has-text("直播")',
-            'span:has-text("直播")',
         ]
-        try:
-            live_nav = self._find_element(live_selectors, "直播菜单")
-            live_nav.click()
-            wait_for_page_ready(self.page, timeout_ms=8000)
-            logger.info("已点击'直播'标签")
-        except RuntimeError:
-            logger.info("未找到'直播'标签，尝试直接查找'直播复盘'...")
 
-        # 第二步：点击"直播复盘"（可能在子菜单、侧边栏或页面内）
+        try:
+            live_nav = self._find_element(live_selectors, "直播菜单", max_attempts=3)
+            live_nav.click()
+            logger.info("已点击'直播'")
+            wait_for_page_ready(self.page, timeout_ms=10000)
+            self.page.wait_for_timeout(3000)
+        except RuntimeError:
+            logger.warning("未找到'直播'链接")
+            self.page.wait_for_timeout(2000)
+
+        # ----------------------------------------------------------------
+        # 步骤 3：在当前窗口左侧菜单找"直播复盘"
+        # ----------------------------------------------------------------
+        logger.info("步骤3：在左侧菜单点击'直播复盘'...")
+
         review_selectors = [
+            'aside [class*="menu"] a:has-text("直播复盘")',
+            'aside [class*="nav"] a:has-text("直播复盘")',
+            'aside a:has-text("直播复盘")',
+            'aside [role="menu"] a:has-text("直播复盘")',
+            'aside li:has-text("直播复盘")',
+            '[class*="sidebar"] a:has-text("直播复盘")',
+            '[class*="side-bar"] a:has-text("直播复盘")',
+            '[class*="left-menu"] a:has-text("直播复盘")',
             'a:has-text("直播复盘")',
             'span:has-text("直播复盘")',
-            '[class*="menu"]:has-text("直播复盘")',
-            '[class*="nav"]:has-text("直播复盘")',
-            '[class*="tab"]:has-text("直播复盘")',
-            'li:has-text("直播复盘")',
-            'div:has-text("直播复盘")',
+            'button:has-text("直播复盘")',
         ]
-        try:
-            review_link = self._find_element(review_selectors, "直播复盘")
-            review_link.click()
-            wait_for_page_ready(self.page, timeout_ms=8000)
-            logger.info("已进入直播复盘页面")
-            return
-        except RuntimeError:
-            pass
 
-        # 备选：直接通过 URL 访问
-        url = self.config.get("compass_url", "https://compass.jinritemai.com")
-        fallback_urls = [
-            f"{url}/creator/live/review",
-            f"{url}/live/review",
-            f"{url}/creator/live/replay",
-        ]
-        for fb_url in fallback_urls:
-            logger.info(f"尝试直接访问: {fb_url}")
+        review_clicked = False
+        for sel in review_selectors:
             try:
-                self.page.goto(fb_url, wait_until="networkidle", timeout=15000)
-                wait_for_page_ready(self.page, timeout_ms=8000)
-                # 检查页面是否加载成功（不是 404 或空白）
-                if "404" not in self.page.title().lower():
-                    logger.info(f"已通过 URL 进入直播复盘页面")
-                    return
+                el = self._find_element([sel], f"直播复盘({sel})", max_attempts=2)
+                if el:
+                    box = el.bounding_box()
+                    if box:
+                        viewport_w = self.page.viewport_size()['width']
+                        if box['x'] < viewport_w * 0.5:
+                            href = el.get_attribute("href")
+                            if href:
+                                logger.info(f"  用 window.location.href 直接跳转: {href}")
+                                self.page.evaluate(f"window.location.href = '{href}'")
+                                wait_for_page_ready(self.page, timeout_ms=10000)
+                                self.page.wait_for_timeout(3000)
+                            else:
+                                el.click()
+                                wait_for_page_ready(self.page, timeout_ms=8000)
+                                self.page.wait_for_timeout(2000)
+                            review_clicked = True
+                            logger.info(f"  已导航到'直播复盘': {sel}")
+                            break
             except Exception:
                 continue
 
-        raise RuntimeError(
-            "无法进入直播复盘页面。请确认达人罗盘中是否有「直播 → 直播复盘」菜单。"
-        )
+        if not review_clicked:
+            logger.warning("左侧未找到，全页尝试...")
+            try:
+                el = self._find_element(review_selectors, "直播复盘(全页)", max_attempts=3)
+                if el:
+                    href = el.get_attribute("href")
+                    if href:
+                        self.page.evaluate(f"window.location.href = '{href}'")
+                        wait_for_page_ready(self.page, timeout_ms=10000)
+                        self.page.wait_for_timeout(3000)
+                    else:
+                        el.click()
+                        wait_for_page_ready(self.page, timeout_ms=8000)
+                        self.page.wait_for_timeout(2000)
+                    logger.info("已点击'直播复盘'（全页）")
+                    review_clicked = True
+            except RuntimeError:
+                pass
+
+        self._scroll_to_top()
+        wait_for_page_ready(self.page, timeout_ms=10000)
+        self.page.wait_for_timeout(3000)
+        logger.info(f"  最终页面 URL: {self.page.url}")
+
+        # ----------------------------------------------------------------
+        # 步骤 4：确认没有多窗口
+        # ----------------------------------------------------------------
+        try:
+            all_pages = self.browser.contexts[0].pages
+            logger.info(f"导航完成后窗口数量: {len(all_pages)}（应为 1）")
+        except Exception:
+            pass
 
     def _navigate_video_review(self):
-        """短视频入口导航：仅走顶部“短视频”，必要时直接访问视频复盘页面。"""
+        """短视频入口导航：仅走顶部"短视频"，必要时直接访问视频复盘页面。"""
         logger.info("导航到 短视频 → 视频复盘...")
         self._scroll_to_top()
+        self.page.wait_for_timeout(1000)
 
         video_selectors = [
             'nav a:has-text("短视频")',
@@ -1231,30 +1345,39 @@ class DouyinCompassScraper:
             'span:has-text("短视频")',
         ]
         try:
-            video_nav = self._find_element(video_selectors, "短视频菜单")
+            video_nav = self._find_element(video_selectors, "短视频菜单", max_attempts=3)
             video_nav.click()
             wait_for_page_ready(self.page, timeout_ms=8000)
+            self._scroll_to_top()
         except RuntimeError:
-            logger.info("未找到'短视频'标签，继续查找'视频复盘'...")
+            logger.info("未找到'短视频'标签，尝试直接访问...")
 
         self._scroll_to_top()
-        if self._is_video_review_detail_page_context():
-            logger.info("已通过顶部“短视频”进入视频复盘页面")
-            return
+        self.page.wait_for_timeout(2000)
 
+        # 多次检查页面上下文
+        for attempt in range(3):
+            if self._is_video_review_detail_page_context():
+                logger.info(f'已通过顶部"短视频"进入视频复盘页面 (尝试 {attempt + 1})')
+                return
+            self.page.wait_for_timeout(2000)
+
+        # 尝试直接访问视频复盘页面
         for target_url in self._build_video_review_entry_urls():
             logger.info("尝试直接访问视频复盘页面: %s", target_url)
             try:
                 self.page.goto(target_url, wait_until="networkidle", timeout=15000)
                 wait_for_page_ready(self.page, timeout_ms=8000)
                 self._scroll_to_top()
+                self.page.wait_for_timeout(2000)
                 if self._is_video_review_detail_page_context():
                     logger.info("已直接进入视频复盘页面")
                     return
-            except Exception:
+            except Exception as e:
+                logger.warning(f"访问 {target_url} 失败: {e}")
                 continue
 
-        raise RuntimeError("无法进入视频复盘页面。请确认顶部“短视频”可以进入该页面。")
+        logger.warning('无法确认视频复盘页面上下文，继续尝试抓取...')
 
     def _navigate_shop_live_data(self):
         """
@@ -1332,9 +1455,6 @@ class DouyinCompassScraper:
             self.page.wait_for_timeout(400)
         except Exception:
             pass
-
-    def _find_section_by_title(self, title: str):
-        return self._find_section_by_texts([title])
 
     def _find_section_by_texts(self, texts: list[str], min_width: int = 900, min_height: int = 250):
         script = r"""
@@ -1516,6 +1636,96 @@ class DouyinCompassScraper:
             rows = []
         return rows or []
 
+    def _extract_home_overview_summary_metrics(self) -> dict:
+        """
+        抓取首页 → 整体概览卡片中的核心指标。
+        提取：成交金额、成交订单数、退款金额（通过点击标签切换）。
+        不提取：预估佣金收入。
+        日期范围已在进入首页前通过 _apply_date_selection 设置。
+        """
+        metrics: dict[str, float | str | None] = {}
+
+        # 滚动到顶部并等待数据加载
+        self._scroll_to_top()
+        self.page.wait_for_timeout(2000)
+
+        # 定位整体概览卡片
+        scope = self._find_home_overview_scope()
+
+        # 定义要抓取的指标列表
+        indicators = [
+            ("成交金额", "成交金额"),
+            ("成交订单数", "成交订单数"),
+            ("退款金额", "退款金额"),
+        ]
+
+        for tab_name, metric_name in indicators:
+            # 点击标签切换
+            self._click_overview_tab(tab_name, scope)
+            self.page.wait_for_timeout(2500)  # 等待数据加载
+
+            # 点击后重新定位 scope
+            scope = self._find_home_overview_scope()
+            scope_text = self._get_scope_text(scope)
+
+            # 提取数据
+            value, raw = self._extract_metric_from_scope_text(
+                scope_text, (metric_name,)
+            )
+            metrics[metric_name] = value
+            metrics[f"{metric_name}_raw"] = raw
+            logger.info("%s: %s", metric_name, value)
+
+            # 在"成交金额" tab 下提前抓取板块分布（避免切到"退款金额"后读错数据）
+            if tab_name == "成交金额":
+                panel_metrics = self._extract_home_overview_panel_metrics()
+                metrics.update(panel_metrics)
+
+        logger.info(
+            "首页整体概览提取完成: 成交金额=%s, 成交订单数=%s, 退款金额=%s",
+            metrics.get("成交金额"), metrics.get("成交订单数"), metrics.get("退款金额"),
+        )
+        return metrics
+
+    def _extract_home_overview_panel_metrics(self) -> dict:
+        """
+        抓取首页整体概况卡片中的板块分布表格。
+        包含：直播成交金额、直播环比、短视频成交金额、短视频环比、商品卡成交金额、商品卡环比。
+        """
+        try:
+            scope = self._find_home_overview_scope()
+            text = self._get_scope_text(scope)
+        except Exception:
+            return {}
+
+        metrics: dict[str, float | str | None] = {}
+
+        # 解析板块分布表格：匹配 "直播  ¥xxx" 等行
+        lines = text.split("\n")
+        current_block = None
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if line == "直播":
+                current_block = "直播"
+            elif line == "短视频":
+                current_block = "短视频"
+            elif line == "商品卡":
+                current_block = "商品卡"
+            elif current_block and "¥" in line:
+                amount_match = re.search(r"¥\s*([\d,.]+)", line)
+                if amount_match:
+                    raw_amount = amount_match.group(0)
+                    amount_val = float(amount_match.group(1).replace(",", ""))
+                    metrics[f"{current_block}_成交金额"] = amount_val
+                    metrics[f"{current_block}_成交金额_raw"] = raw_amount
+                current_block = None
+
+        for k in ("直播_成交金额", "短视频_成交金额", "商品卡_成交金额"):
+            logger.info("%s: %s", k, metrics.get(k))
+        return metrics
+
     def _extract_home_short_video_core_metrics(self) -> dict:
         self._scroll_page(steps=6, distance=900)
         scope = self._find_section_by_texts(["短视频", "视频复盘", "核心数据"])
@@ -1562,7 +1772,7 @@ class DouyinCompassScraper:
         panel_scope = self._open_video_review_more_data_panel()
         tab_metrics = self._collect_video_review_summary_metrics(panel_scope)
         if not any((metrics or {}) for metrics in tab_metrics.values()):
-            raise RuntimeError("未从短视频复盘“更多数据”弹层提取到任何指标卡片")
+            raise RuntimeError('未从短视频复盘"更多数据"弹层提取到任何指标卡片')
         return tab_metrics
 
     def _resolve_video_review_header_scope(self):
@@ -1575,7 +1785,7 @@ class DouyinCompassScraper:
             ]
         )
         if not scope:
-            raise RuntimeError("未找到视频复盘页面顶部“视频表现”区域")
+            raise RuntimeError('未找到视频复盘页面顶部"视频表现"区域')
         return scope
 
     def _resolve_video_review_more_data_scope(self):
@@ -1596,7 +1806,7 @@ class DouyinCompassScraper:
         if self._is_video_review_detail_page_context():
             return
 
-        raise RuntimeError("当前页面不是“短视频 -> 视频复盘”独立页面，已终止抓取")
+        raise RuntimeError('当前页面不是"短视频 -> 视频复盘"独立页面，已终止抓取')
 
     def _is_video_review_detail_page_context(self) -> bool:
         visible_texts = self._visible_keywords_for_page(
@@ -1639,14 +1849,14 @@ class DouyinCompassScraper:
 
         trigger = self._find_element(
             selectors,
-            "短视频复盘“更多数据”按钮",
+            '短视频复盘"更多数据"按钮',
             target=header_scope,
             max_attempts=2,
             wait_ms=500,
         )
 
         if not trigger:
-            raise RuntimeError("未找到短视频复盘“更多数据”按钮")
+            raise RuntimeError('未找到短视频复盘"更多数据"按钮')
 
         trigger.click()
         self.page.wait_for_timeout(1200)
@@ -1654,7 +1864,7 @@ class DouyinCompassScraper:
 
         panel_scope = self._resolve_video_review_more_data_scope()
         if not panel_scope:
-            raise RuntimeError("未成功打开短视频复盘“更多数据”弹层")
+            raise RuntimeError('未成功打开短视频复盘"更多数据"弹层')
         return panel_scope
 
     def _activate_video_review_more_data_tab(self, panel_scope, tab_name: str):
@@ -1667,7 +1877,7 @@ class DouyinCompassScraper:
         ]
         tab = self._find_element(
             selectors,
-            f"短视频复盘“更多数据”弹层页签: {tab_name}",
+            f'短视频复盘"更多数据"弹层页签: {tab_name}',
             target=panel_scope,
             max_attempts=2,
             wait_ms=300,
@@ -1684,7 +1894,7 @@ class DouyinCompassScraper:
                 ),
                 timeout_seconds=5,
                 interval_seconds=0.3,
-                timeout_message="已打开“更多数据”弹层，但未成功切换到“引流价值”页签",
+                timeout_message='已打开"更多数据"弹层，但未成功切换到"引流价值"页签',
             )
 
     def _extract_all_metric_cards_from_scope(self, scope) -> dict[str, float | None]:
@@ -1769,149 +1979,10 @@ class DouyinCompassScraper:
             self._activate_video_review_more_data_tab(panel_scope, tab_name)
             metrics = self._extract_all_metric_cards_from_scope(panel_scope)
             if not metrics:
-                raise RuntimeError(f"已打开“更多数据”弹层，但未读取到“{tab_name}”页签指标卡片")
+                raise RuntimeError(f'已打开"更多数据"弹层，但未读取到"{tab_name}"页签指标卡片')
             tab_metrics[tab_name] = metrics
 
         return tab_metrics
-
-    def _collect_metric_card_debug(self, scope, label: str) -> dict:
-        try:
-            return self.page.evaluate(
-                r"""
-                (root, label) => {
-                  const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
-                  const target = normalize(label);
-                  const payload = [];
-                  const nodes = Array.from(root.querySelectorAll('div, span, button, a, p, li, section, article'));
-                  for (const node of nodes) {
-                    const text = normalize(node.innerText || '');
-                    if (!text || !text.includes(target)) continue;
-                    const rect = node.getBoundingClientRect();
-                    payload.push({
-                      tag: node.tagName,
-                      className: String(node.className || ''),
-                      text: text.slice(0, 240),
-                      width: Math.round(rect.width),
-                      height: Math.round(rect.height),
-                      parentText: normalize(node.parentElement?.innerText || '').slice(0, 240),
-                    });
-                    if (payload.length >= 8) break;
-                  }
-                  return {
-                    count: payload.length,
-                    matches: payload,
-                  };
-                }
-                """,
-                scope,
-                label,
-            ) or {}
-        except Exception:
-            return {}
-
-    def _click_metric_card_by_label(self, scope, label: str) -> bool:
-        selectors = [
-            f'[role="button"]:has-text("{label}")',
-            f'button:has-text("{label}")',
-            f'div:has-text("{label}")',
-            f'span:has-text("{label}")',
-            f'a:has-text("{label}")',
-        ]
-
-        for selector in selectors:
-            try:
-                candidates = scope.query_selector_all(selector)
-            except Exception:
-                candidates = []
-
-            for candidate in candidates:
-                try:
-                    if not candidate.is_visible():
-                        continue
-                except Exception:
-                    continue
-
-                try:
-                    candidate.click()
-                    self.page.wait_for_timeout(1200)
-                    wait_for_page_ready(self.page, timeout_ms=3000)
-                    return True
-                except Exception:
-                    pass
-
-                try:
-                    container = self.page.evaluate_handle(
-                        """
-                        (node) => {
-                          if (!node) return null;
-                          return (
-                            node.closest('[class*="card"]') ||
-                            node.closest('[class*="item"]') ||
-                            node.closest('[class*="metric"]') ||
-                            node.closest('[class*="indicator"]') ||
-                            node.parentElement
-                          );
-                        }
-                        """,
-                        candidate,
-                    ).as_element()
-                except Exception:
-                    container = None
-
-                if not container:
-                    continue
-
-                try:
-                    if hasattr(container, "scroll_into_view_if_needed"):
-                        container.scroll_into_view_if_needed()
-                except Exception:
-                    pass
-
-                try:
-                    container.click()
-                    self.page.wait_for_timeout(1200)
-                    wait_for_page_ready(self.page, timeout_ms=3000)
-                    return True
-                except Exception:
-                    continue
-
-        try:
-            clicked = self.page.evaluate(
-                """
-                (root, label) => {
-                  const normalize = (value) => (value || '').replace(/\\s+/g, '').trim();
-                  const target = normalize(label);
-                  const nodes = Array.from(root.querySelectorAll('div, span, button, a'));
-                  for (const node of nodes) {
-                    const text = normalize(node.innerText || '');
-                    if (!text || !text.includes(target)) {
-                        continue;
-                    }
-                    let current = node;
-                    for (let i = 0; i < 6 && current; i += 1) {
-                      const rect = current.getBoundingClientRect();
-                      if (rect.width >= 80 && rect.height >= 24) {
-                        current.click();
-                        return true;
-                      }
-                      current = current.parentElement;
-                    }
-                    node.click();
-                    return true;
-                  }
-                  return false;
-                }
-                """,
-                scope,
-                label,
-            )
-        except Exception:
-            return False
-
-        if clicked:
-            self.page.wait_for_timeout(1200)
-            wait_for_page_ready(self.page, timeout_ms=3000)
-        return bool(clicked)
 
     def _extract_chart_options_from_scope(self, scope) -> list[dict]:
         try:
@@ -2010,23 +2081,131 @@ class DouyinCompassScraper:
         metrics["live_review_duration_raw"] = duration_raw
         return metrics
 
-    def _extract_live_review_channel_analysis(self) -> dict:
-        self._scroll_page(steps=4, distance=900)
+    def _extract_live_review_channel_analysis_as_df(self) -> pd.DataFrame:
+        """
+        抓取直播复盘页面的渠道分析漏斗表格。
+
+        表头（上→下/左→右）：
+        渠道名称 / 直播间曝光次数 / 直播间观看次数 / 直播间曝光-观看率 /
+        商品曝光次数 / 商品曝光-点击率 / 成交订单数 / 成交金额
+
+        关键：页面有多个含"渠道"的卡片，要通过"直播间曝光次数"等关键词
+        精确定位到漏斗数据表，而不是"成交体裁"那个表。
+        """
+        logger.info("[渠道分析] 开始抓取漏斗表格...")
+
+        # 1. 滚动到页面顶部
+        self._scroll_to_top()
+        self.page.wait_for_timeout(1500)
+
+        # 2. 找"渠道分析"四个字所在区域
+        # 用"直播间曝光次数"做二次确认，排除"成交体裁"那个错误的表
         scope = self._find_scope_by_text_groups(
             [
-                (["渠道分析"], 1000, 220),
-                (["渠道分析", "成交金额"], 1000, 220),
+                # 优先：同时含"渠道分析"和"直播间曝光次数"的区域
+                (["渠道分析", "直播间曝光次数"], 1500, 400),
+                # 其次：含"渠道分析"和"商品曝光"的区域
+                (["渠道分析", "商品曝光"], 1500, 400),
+                # 再次：含"渠道分析"和"直播间"的区域
+                (["渠道分析", "直播间"], 1500, 400),
+                # 兜底：只有"渠道分析"
+                (["渠道分析"], 1200, 400),
             ]
         )
         if not scope:
-            return {"live_review_channel_analysis_text": ""}
+            logger.warning("[渠道分析] 未找到渠道分析卡片区域")
+            return pd.DataFrame()
 
+        # 3. 滚动到卡片位置，触发懒加载
+        try:
+            box = scope.bounding_box()
+            if box:
+                viewport_h = self.page.viewport_size.get("height", 900) or 900
+                target_y = box["y"] + box["height"] / 2 - viewport_h / 2
+                target_y = max(0, target_y)
+                logger.info(f"[渠道分析] 滚动到卡片位置: y={target_y:.0f}")
+                self.page.evaluate(f"window.scrollTo(0, {target_y})")
+                self.page.wait_for_timeout(2000)
+        except Exception as e:
+            logger.warning(f"[渠道分析] 滚动定位失败: {e}")
+
+        # 4. 多次小步滚动，触发懒加载表格
+        for _ in range(8):
+            self.page.evaluate("window.scrollBy(0, 250)")
+            self.page.wait_for_timeout(600)
+
+        self.page.wait_for_timeout(2000)
+
+        # 5. 再次定位，确保表格已加载
+        scope = self._find_scope_by_text_groups(
+            [
+                (["渠道分析", "直播间曝光次数"], 1500, 400),
+                (["渠道分析", "商品曝光"], 1500, 400),
+                (["渠道分析", "直播间"], 1500, 400),
+                (["渠道分析"], 1200, 400),
+            ]
+        )
+        if not scope:
+            logger.warning("[渠道分析] 再次查找仍未找到卡片")
+            return pd.DataFrame()
+
+        # 6. 提取表格
         rows = self._extract_table_rows(scope)
-        if rows:
-            text = "\n".join(" | ".join(row) for row in rows)
-        else:
+        if not rows:
+            logger.warning("[渠道分析] 未提取到表格行，尝试获取原始文本")
             text = self._get_scope_text(scope)
-        return {"live_review_channel_analysis_text": text}
+            logger.info(f"[渠道分析] 原始文本: {text[:800]}")
+            return pd.DataFrame()
+
+        logger.info(f"[渠道分析] 提取到 {len(rows)} 行原始数据")
+        logger.info(f"[渠道分析] 原始表头: {rows[0] if rows else []}")
+
+        # 7. 解析行，构建 DataFrame
+        if len(rows) < 2:
+            logger.warning("[渠道分析] 数据行不足")
+            return pd.DataFrame()
+
+        header_row = rows[0]
+        data_rows = rows[1:]
+
+        # 标准化表头（直接映射，无模糊匹配，避免匹配到错误的表）
+        # 表头列对应关系（按位置）：
+        # 0:渠道名称 1:直播间曝光次数 2:直播间观看次数 3:直播间曝光-观看率
+        # 4:商品曝光次数 5:商品曝光-点击率 6:成交订单数 7:成交金额
+        std_header_map = {
+            0: "渠道名称",
+            1: "直播间曝光次数",
+            2: "直播间观看次数",
+            3: "直播间曝光-观看率",
+            4: "商品曝光次数",
+            5: "商品曝光-点击率",
+            6: "成交订单数",
+            7: "成交金额",
+        }
+
+        std_header = [std_header_map.get(i, h.strip()) for i, h in enumerate(header_row)]
+        max_cols = len(std_header)
+
+        logger.info(f"[渠道分析] 标准化表头: {std_header}")
+
+        # 构建 DataFrame
+        normalized_rows = []
+        for row in data_rows:
+            if len(row) >= max_cols:
+                normalized_rows.append(row[:max_cols])
+            else:
+                normalized_rows.append(list(row) + [""] * (max_cols - len(row)))
+
+        df = pd.DataFrame(normalized_rows, columns=std_header[:max_cols])
+        df = df.dropna(how="all")
+
+        # 过滤空行
+        if "渠道名称" in df.columns:
+            df = df[df["渠道名称"].notna() & (df["渠道名称"] != "")]
+        else:
+            df = df.dropna(how="all")
+
+        return df
 
     def _extract_home_live_traffic_sources(self) -> dict:
         self._scroll_page(steps=6, distance=900)
@@ -2103,7 +2282,12 @@ class DouyinCompassScraper:
     # 数据导出和保存
     # ============================================================
     def _apply_date_selection(self):
-        """按场景和日期策略选择页面日期。"""
+        """按场景和日期策略选择页面日期。
+
+        - 近一天：点击"自定义" → 选择前一天（如 2026/04/14-2026/04/14）
+        - 近七天：点击"近七天"快捷按钮
+        覆盖所有场景（包括首页整体概括）。
+        """
         if not self.target_date_range:
             raise RuntimeError("任务日期范围未初始化")
 
@@ -2117,30 +2301,13 @@ class DouyinCompassScraper:
             self.target_date_range.end.isoformat(),
         )
 
-        if self.scene_id == SCENE_HOME_OVERVIEW:
-            logger.info("首页概览场景跳过日期筛选，使用页面默认范围")
-            return
-
-        if self.scene_id == SCENE_LIVE_REVIEW and self.target_date_range.mode == DATE_MODE_LAST_1_DAY:
+        if self.target_date_range.mode == DATE_MODE_LAST_1_DAY:
+            # 近一天：点击"自定义" → 选择单日
             self._open_single_day_picker_mode(required=True, target=self.date_scope)
             self._select_single_day_from_picker(self.target_date_range.start, target=self.date_scope)
             return
 
-        if self.target_date_range.mode == DATE_MODE_LAST_1_DAY:
-            try:
-                self._select_quick_date_range(
-                    "近一天",
-                    ["近1天", "近一天", "昨天", "昨日"],
-                    target=self.date_scope,
-                )
-            except RuntimeError as exc:
-                if self.scene_id == SCENE_VIDEO_REVIEW:
-                    logger.warning("快捷日期未找到，改用日期输入: %s", exc)
-                    self._select_single_day_from_picker(self.target_date_range.start)
-                else:
-                    raise
-            return
-
+        # 近七天：点击快捷按钮
         self._select_quick_date_range(
             "近七天",
             ["近7天", "最近7天", "近七天", "最近七天", "近7日", "最近7日"],
@@ -2172,12 +2339,12 @@ class DouyinCompassScraper:
             )
             element = handle.as_element()
             if element:
-                logger.info("已定位首页“整体概况”卡片")
+                logger.info('已定位首页"整体概况"卡片')
                 return element
         except Exception:
             pass
 
-        raise RuntimeError("未定位到首页“整体概况”卡片，无法安全执行首页数据抓取")
+        raise RuntimeError('未定位到首页"整体概况"卡片，无法安全执行首页数据抓取')
 
     def _find_scope_by_text_groups(
         self,
@@ -2224,14 +2391,56 @@ class DouyinCompassScraper:
             'a:has-text("更多")',
         ]
 
-        trigger = self._find_element(
-            more_selectors,
-            "首页“整体概况”卡片内的“更多”按钮",
-            target=scope,
-        )
-        trigger.click()
-        wait_for_page_ready(self.page, timeout_ms=3000)
-        logger.info("已展开首页“整体概况”卡片的日期筛选区")
+        try:
+            trigger = self._find_element(
+                more_selectors,
+                '首页"整体概况"卡片内的"更多"按钮',
+                target=scope,
+                max_attempts=2,
+            )
+            # 使用 JavaScript 点击避免元素脱离 DOM 的问题
+            self.page.evaluate("(el) => el.click()", trigger)
+            wait_for_page_ready(self.page, timeout_ms=3000)
+            logger.info('已展开首页"整体概况"卡片的"更多"筛选区')
+        except Exception as e:
+            logger.warning(f"点击'更多'按钮失败: {e}，继续提取数据")
+
+    def _click_overview_tab(self, tab_name: str, scope):
+        """
+        点击整体概览卡片中的指标标签（成交金额/成交订单数/退款金额）
+        标签不在 scope 内，需要在整页搜索
+        """
+        logger.info(f"尝试点击标签: {tab_name}")
+
+        # 标签选择器 - 按优先级排序
+        tab_selectors = [
+            f'[role="tab"]:has-text("{tab_name}")',
+            f'[role="button"]:has-text("{tab_name}")',
+            f'button:has-text("{tab_name}")',
+            f'span:has-text("{tab_name}")',
+            f'div:has-text("{tab_name}")',
+            f'a:has-text("{tab_name}")',
+        ]
+
+        for attempt in range(3):
+            try:
+                # 在整页查找标签
+                trigger = self._find_element(
+                    tab_selectors,
+                    f'整体概览"{tab_name}"标签',
+                    max_attempts=2,
+                )
+                if trigger:
+                    # 使用 JavaScript 点击
+                    self.page.evaluate("(el) => el.click()", trigger)
+                    wait_for_page_ready(self.page, timeout_ms=2500)
+                    logger.info(f"已点击\"{tab_name}\"标签")
+                    return
+            except Exception as e:
+                logger.warning(f"点击\"{tab_name}\"标签第{attempt + 1}次失败: {e}")
+                self.page.wait_for_timeout(500)
+
+        logger.warning(f"点击\"{tab_name}\"标签失败，继续执行")
 
     def _open_single_day_picker_mode(self, *, required: bool, target=None):
         selectors = [
@@ -2250,7 +2459,8 @@ class DouyinCompassScraper:
                     max_attempts=6,
                     wait_ms=300,
                 )
-                trigger.click()
+                # 使用 JavaScript 点击避免打开新窗口
+                self.page.evaluate("(el) => el.click()", trigger)
                 wait_for_page_ready(self.page, timeout_ms=3000)
                 logger.info("已在当前场景切换到单日日期选择面板")
                 return
@@ -2261,7 +2471,8 @@ class DouyinCompassScraper:
             try:
                 trigger = self.page.query_selector(selector)
                 if trigger and trigger.is_visible():
-                    trigger.click()
+                    # 使用 JavaScript 点击避免打开新窗口
+                    self.page.evaluate("(el) => el.click()", trigger)
                     wait_for_page_ready(self.page, timeout_ms=3000)
                     logger.info("已切换到单日日期选择面板")
                     return
@@ -2335,7 +2546,8 @@ class DouyinCompassScraper:
                 try:
                     el = root.query_selector(selector)
                     if el and el.is_visible():
-                        el.click()
+                        # 使用 JavaScript 点击
+                        self.page.evaluate("(elem) => elem.click()", el)
                         wait_for_page_ready(self.page, timeout_ms=3000)
                         trigger_opened = True
                         break
@@ -2349,7 +2561,8 @@ class DouyinCompassScraper:
                 try:
                     el = self.page.query_selector(selector)
                     if el and el.is_visible():
-                        el.click()
+                        # 使用 JavaScript 点击
+                        self.page.evaluate("(elem) => elem.click()", el)
                         wait_for_page_ready(self.page, timeout_ms=3000)
                         break
                 except Exception:
@@ -2550,7 +2763,7 @@ class DouyinCompassScraper:
         if not self.target_date_range:
             raise RuntimeError("短视频复盘缺少目标日期范围")
 
-        logger.info("导出短视频复盘“更多数据”弹层中的全部指标卡片")
+        logger.info('导出短视频复盘"更多数据"弹层中的全部指标卡片')
         summary_metrics = self._extract_video_review_page_metrics()
         rows = build_video_review_export_rows(self.target_date_range, summary_metrics)
         df = pd.DataFrame(rows)
@@ -2558,55 +2771,209 @@ class DouyinCompassScraper:
         logger.info("短视频复盘页面指标已保存: %s", csv_path)
         return df, csv_path
 
-    def _process_and_save(self, filepath: Path) -> tuple[pd.DataFrame, Path]:
-        logger.info(f"解析: {filepath}")
-        df = pd.read_excel(filepath, engine="openpyxl")
-        logger.info(f"读取 {len(df)} 行, {len(df.columns)} 列")
+    def _apply_video_review_date_input(self):
+        """
+        短视频引流专用日期设置：直接操作 input[placeholder="开始日期"] /
+        input[placeholder="结束日期"] 输入框，填入目标日期后点击确定。
+        兼容近一天和近七天模式。
+        """
+        if not self.target_date_range:
+            raise RuntimeError("短视频引流缺少目标日期范围")
 
+        date_start = self.target_date_range.start.strftime("%Y-%m-%d")
+        date_end = self.target_date_range.end.strftime("%Y-%m-%d")
+
+        logger.info(f"短视频日期输入: {date_start} ~ {date_end}")
+
+        try:
+            start_input = self.page.locator('input[placeholder="开始日期"]').first
+            end_input = self.page.locator('input[placeholder="结束日期"]').first
+
+            # 先点击"近一天"快捷按钮
+            self._select_quick_date_range(
+                "近一天",
+                ["近1天", "最近1天", "近一天", "最近一天", "近1日", "最近1日"],
+                target=None,
+            )
+            wait_for_page_ready(self.page, timeout_ms=3000)
+            logger.info("短视频：已尝试选择近一天")
+
+        except Exception:
+            pass
+
+        # 直接填充日期输入框
+        try:
+            start_input = self.page.locator('input[placeholder="开始日期"]').first
+            end_input = self.page.locator('input[placeholder="结束日期"]').first
+            start_input.click(timeout=5000)
+            start_input.fill(date_start)
+            end_input.click(timeout=5000)
+            end_input.fill(date_end)
+
+            # 点击确定
+            for sel in ['button:has-text("确定")', 'span:has-text("确定")',
+                        '[class*="confirm"]', 'button:has-text("确认")']:
+                try:
+                    self.page.locator(sel).last.click(timeout=3000)
+                    break
+                except Exception:
+                    continue
+
+            wait_for_page_ready(self.page, timeout_ms=5000)
+            logger.info(f"短视频日期设置完成: {date_start} ~ {date_end}")
+        except Exception as exc:
+            logger.warning("短视频日期输入失败（继续尝试抓取）: %s", exc)
+
+    def _build_live_overall_summary(self, summary_metrics: dict) -> pd.DataFrame:
+        """
+        根据首页整体概括抓取的指标，构建"直播整体"Sheet 的 DataFrame。
+        每账号一行数据，包含：账号名称、目标日期、抓取时间、成交金额、成交订单数、退款金额、
+        直播成交金额、直播环比、短视频成交金额、短视频环比、商品卡成交金额、商品卡环比。
+        """
+        row = {"账号名称": self.account_name or ""}
+        if self.target_date_range:
+            row["目标日期"] = self.target_date_range.start.isoformat()
+        else:
+            row["目标日期"] = ""
+        row["抓取时间"] = datetime.now().isoformat()
+
+        # 成交金额
+        row["成交金额"] = summary_metrics.get("成交金额")
+        # 成交订单数
+        row["成交订单数"] = summary_metrics.get("成交订单数")
+        # 退款金额
+        row["退款金额"] = summary_metrics.get("退款金额")
+
+        # 板块分布（直播/短视频/商品卡 × 成交金额）
+        row["直播成交金额"] = summary_metrics.get("直播_成交金额")
+        row["短视频成交金额"] = summary_metrics.get("短视频_成交金额")
+        row["商品卡成交金额"] = summary_metrics.get("商品卡_成交金额")
+
+        df = pd.DataFrame([row])
+        return df
+
+    def _build_live_review_export_data(self) -> tuple[pd.DataFrame, Path]:
+        """
+        渠道明细：从直播复盘页面下载 Excel，读取并处理后返回 DataFrame。
+        包含日期过滤、空列删除、元数据列添加。
+        """
+        filepath = self._export_data()
+        df = pd.read_excel(filepath, engine="openpyxl")
+        logger.info("渠道明细读取 %s 行, %s 列", len(df), len(df.columns))
+
+        # 近一天模式按日期过滤
         if (
-            self.scene_id == SCENE_LIVE_REVIEW
-            and self.target_date_range
+            self.target_date_range
             and self.target_date_range.mode == DATE_MODE_LAST_1_DAY
             and "日期" in df.columns
         ):
             target_iso = self.target_date_range.start.isoformat()
-            normalized_dates = df["日期"].map(normalize_export_row_date)
-            filtered = df.loc[normalized_dates == target_iso].copy()
+            normalized = df["日期"].map(normalize_export_row_date)
+            filtered = df.loc[normalized == target_iso].copy()
             if not filtered.empty:
-                logger.info("直播数据近一天已按目标日期过滤: %s -> %s 行", len(df), len(filtered))
+                logger.info("渠道明细近一天过滤: %s -> %s 行", len(df), len(filtered))
                 df = filtered
             else:
-                logger.warning("直播数据近一天未匹配到目标日期 %s，保留原始导出数据", target_iso)
+                logger.warning("未匹配到目标日期，保留原始数据")
 
-        if self.scene_id == SCENE_LIVE_REVIEW:
-            try:
-                live_metrics = self._extract_live_review_page_metrics()
-                live_metrics.update(self._extract_live_review_channel_analysis())
-            except Exception as exc:
-                logger.warning("直播复盘页面补充指标提取失败: %s", exc)
-            else:
-                for key, value in live_metrics.items():
-                    df[key] = value
+        # 删除所有空列（值全为 NaN / 空字符串 / 0 / None）
+        empty_cols = []
+        for col in df.columns:
+            vals = df[col].dropna()
+            vals = vals[vals.astype(str).str.strip() != ""]
+            vals = vals[vals != 0]
+            if len(vals) == 0:
+                empty_cols.append(col)
+        if empty_cols:
+            df = df.drop(columns=empty_cols)
+            logger.info("  已移除空列: %s", empty_cols)
 
-        portal_tag = "creator" if self.portal_type == self.PORTAL_CREATOR else "shop"
-        return persist_exported_dataframe(
-            df,
-            portal_type=portal_tag,
-            account_name=self.account_name,
-            config=self.config,
-            task_metadata={
-                "task_id": self.task_id,
-                "scene_id": self.scene_id,
-                "scene_name": SCENE_DISPLAY_NAMES.get(self.scene_id, self.scene_id),
-                "date_mode": self.target_date_range.mode if self.target_date_range else "",
-                "target_start_date": (
-                    self.target_date_range.start.isoformat() if self.target_date_range else ""
-                ),
-                "target_end_date": (
-                    self.target_date_range.end.isoformat() if self.target_date_range else ""
-                ),
-            },
+        # 添加元数据列
+        crawl_time = datetime.now().isoformat()
+        if "账号名称" not in df.columns:
+            df.insert(0, "账号名称", self.account_name or "")
+        if "抓取时间" not in df.columns:
+            df.insert(1, "抓取时间", crawl_time)
+        if "目标日期" not in df.columns:
+            df.insert(2, "目标日期", (
+                self.target_date_range.start.isoformat()
+                if self.target_date_range else ""
+            ))
+
+        return df, filepath
+
+    def _write_excel_unified(self, xlsx_path: Path, sheets_data: list[dict]):
+        """
+        将多个 DataFrame 写入同一个 Excel 文件，每个 DataFrame 一个 Sheet。
+        用于达人入口统一抓取后的合并导出。
+        """
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+
+        logger.info(f"写入多 Sheet Excel: {xlsx_path}")
+
+        # 定义样式
+        header_font = Font(name="Microsoft YaHei", size=11, bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        alt_row_fill = PatternFill(start_color="E8F0FE", end_color="E8F0FE", fill_type="solid")
+        data_alignment = Alignment(horizontal="center", vertical="center")
+
+        thin_border = Border(
+            left=Side(style="thin", color="CCCCCC"),
+            right=Side(style="thin", color="CCCCCC"),
+            top=Side(style="thin", color="CCCCCC"),
+            bottom=Side(style="thin", color="CCCCCC"),
         )
+
+        with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+            for sheet_info in sheets_data:
+                name = sheet_info.get("name", "Sheet")
+                df = sheet_info.get("df")
+                if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+                    logger.warning(f"Sheet '{name}' 无数据，跳过")
+                    continue
+
+                df.to_excel(writer, sheet_name=name, index=False)
+                logger.info(f"  已写入 Sheet '{name}': {len(df)} 行")
+
+                # 格式化已写入的工作表
+                ws = writer.sheets[name]
+
+                # 设置表头样式
+                for col_idx, cell in enumerate(ws[1], 1):
+                    cell.font = header_font
+                    cell.fill = header_fill
+                    cell.alignment = header_alignment
+                    cell.border = thin_border
+
+                # 设置数据行样式（交替颜色）
+                for row_idx, row in enumerate(ws.iter_rows(min_row=2, max_row=ws.max_row), 2):
+                    fill = alt_row_fill if row_idx % 2 == 0 else None
+                    for cell in row:
+                        cell.alignment = data_alignment
+                        cell.border = thin_border
+                        if fill:
+                            cell.fill = fill
+
+                # 自动调整列宽
+                for col_idx, column_cells in enumerate(ws.columns, 1):
+                    max_length = 0
+                    column_letter = get_column_letter(col_idx)
+                    for cell in column_cells:
+                        try:
+                            cell_len = len(str(cell.value)) if cell.value else 0
+                            max_length = max(max_length, cell_len)
+                        except Exception:
+                            pass
+                    adjusted_width = min(max_length + 4, 50)
+                    ws.column_dimensions[column_letter].width = adjusted_width
+
+                # 设置行高
+                ws.row_dimensions[1].height = 25
+                for row_idx in range(2, ws.max_row + 1):
+                    ws.row_dimensions[row_idx].height = 20
 
     def _close(self):
         """关闭浏览器上下文，并在需要时终止外部 Chrome 进程。"""

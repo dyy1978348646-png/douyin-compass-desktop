@@ -54,11 +54,11 @@ for d in [DATA_DIR, LOG_DIR, DOWNLOAD_DIR, PLAYWRIGHT_BROWSERS_DIR]:
 DEFAULT_CONFIG = {
     "compass_url": "https://compass.jinritemai.com",
     "portal_type": "creator",       # "creator" = 达人入口, "shop" = 店铺入口
-    "scene_id": "auto",             # auto | live_review | home_overview | video_review | shop_live_data
     "date_mode": "last_7_days",     # last_7_days | last_1_day
     "schedule_enabled": True,
     "schedule_hour": 8,
     "schedule_minute": 0,
+    "output_dir": "",
     "headless": False,
     "browser_launch_mode": "auto",
     "browser_channel": "chrome",
