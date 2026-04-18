@@ -76,6 +76,12 @@ jobs:
           PYTHONUTF8: "1"
         run: build.bat
 
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: douyin-compass-scraper-windows
+          path: dist/douyin-compass-scraper-windows.zip
+
       - name: Publish Windows release asset
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
